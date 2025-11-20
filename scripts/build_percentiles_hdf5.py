@@ -1,14 +1,48 @@
 #!/usr/bin/env python3
 """Build HDF5 percentile reference files from .tsv(.gz) score files.
 
+Each input file is expected to follow the filename pattern:
+    LEN-<length>_HLA-<allele>_ALG-<algorithm>.scores.tsv[.gz]
+
+The script scans an input directory for all matching .scores.tsv / .scores.tsv.gz
+files and writes one HDF5 file per allele. Inside each allele HDF5 file the
+stored datasets are grouped by algorithm name, and within each algorithm group
+there is one dataset per peptide length named like "10mer" or "9mer". Each
+dataset contains a sorted 1D numpy array (dtype float32) of scores saved with
+gzip compression. These sorted arrays can be used to compute percentiles via
+binary search or numpy/searchsorted.
+
 Usage: python build_percentiles_hdf5.py /path/to/input_folder --out-dir /path/to/output
 
-This scans the input folder for files like:
-  LEN-10_HLA-B_07_02_ALG-MhcNuggetsI.scores.tsv.gz
+Example filename that will be parsed correctly:
+    LEN-10_HLA-B_07_02_ALG-MhcNuggetsI.scores.tsv.gz
 
-and writes one HDF5 file per algorithm, e.g. MhcNuggetsI_percentiles.h5
-Datasets are written at /HLA-B_07_02/10mer and contain a sorted 1D array
-of scores (float32) using gzip compression.
+Example on-disk layout produced by the script (one file per allele):
+    HLA-B_07_02_percentiles.h5
+    └─ /MhcNuggetsI/10mer         (1D float32 array, sorted)
+    └─ /NetMHCpan/9mer             (1D float32 array, sorted)
+
+Small example showing how to open an allele HDF5 file and access the stored
+scores for a particular algorithm and peptide length in Python::
+
+        import h5py
+        import numpy as np
+
+        h5_path = "HLA-B_07_02_percentiles.h5"
+        alg = "MhcNuggetsI"
+        length = 10
+
+        with h5py.File(h5_path, "r") as h5:
+                ds_path = f"/{alg}/{length}mer"
+                if ds_path in h5:
+                        scores = h5[ds_path][()]  # numpy array of float32, already sorted
+                else:
+                        raise KeyError(f"Dataset not found: {ds_path} in {h5_path}")
+
+        # Example: compute the percentile of a new score using searchsorted
+        new_score = 0.123
+        pct = 100.0 * np.searchsorted(scores, new_score, side="left") / scores.size
+
 """
 from __future__ import annotations
 
@@ -63,22 +97,47 @@ def group_files_by_algorithm(paths: Iterable[Path]) -> Dict[str, List[Path]]:
     return groups
 
 
-def build_hdf5_for_algorithm(algorithm: str, files: Iterable[Path], out_dir: Path) -> Path:
+def group_files_by_allele(paths: Iterable[Path]) -> Dict[str, List[Path]]:
+    groups: Dict[str, List[Path]] = {}
+    for p in paths:
+        try:
+            _, allele, _ = parse_filename(p)
+        except ValueError:
+            continue
+        groups.setdefault(allele, []).append(p)
+    return groups
+
+
+def build_hdf5_for_allele(allele: str, files: Iterable[Path], out_dir: Path) -> Path:
+    """Create one HDF5 file per allele containing datasets at /<Algorithm>/<Length>mer.
+
+    Args:
+        allele: allele string (e.g. 'A_01_01')
+        files: Iterable of Path objects for this allele
+        out_dir: directory to write the HDF5 file
+
+    Returns:
+        Path to the written HDF5 file
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{algorithm}_percentiles.h5"
+    out_path = out_dir / f"HLA-{allele}_percentiles.h5"
     with h5py.File(out_path, "w") as h5:
+        # For each file, process and store under /<Algorithm>/<Length>mer
         for p in sorted(files):
-            alg, length, allele, scores = process_file(p)
-            # group like /HLA-B_07_02/10mer
-            grp_name = f"HLA-{allele}"
+            alg, length, file_allele, scores = process_file(p)
+            # sanity: file_allele should match allele
+            if file_allele != allele:
+                # this shouldn't happen since files were grouped by allele, but skip if it does
+                print(f"Skipping {p.name}: allele mismatch ({file_allele} != {allele})")
+                continue
+            grp = h5.require_group(alg)
             ds_name = f"{length}mer"
-            grp = h5.require_group(grp_name)
-            # write dataset with gzip compression
+            # overwrite if present
             if ds_name in grp:
-                print(f"Overwriting dataset {grp_name}/{ds_name} in {out_path}")
+                print(f"Overwriting dataset /{alg}/{ds_name} in {out_path}")
                 del grp[ds_name]
             grp.create_dataset(ds_name, data=scores, compression="gzip", compression_opts=4)
-            print(f"Stored {p.name} -> {out_path}:{grp_name}/{ds_name} (n={scores.size})")
+            print(f"Stored {p.name} -> {out_path}:/{alg}/{ds_name} (n={scores.size})")
     return out_path
 
 
@@ -93,13 +152,13 @@ def main(argv: List[str] | None = None) -> int:
         print(f"No .scores.tsv or .scores.tsv.gz files found in {args.input}")
         return 2
 
-    groups = group_files_by_algorithm(files)
-    if not groups:
+    allele_groups = group_files_by_allele(files)
+    if not allele_groups:
         print("No files matched expected filename pattern; nothing to do.")
         return 3
 
-    for alg, paths in groups.items():
-        build_hdf5_for_algorithm(alg, paths, args.out_dir)
+    for allele, paths in allele_groups.items():
+        build_hdf5_for_allele(allele, paths, args.out_dir)
 
     print("Done.")
     return 0
