@@ -80,10 +80,19 @@ def find_score_column(df: pd.DataFrame) -> str:
 def process_file(path: Path) -> Tuple[str, int, str, np.ndarray]:
     length, allele, alg = parse_filename(path)
     df = pd.read_csv(path, sep="\t", compression=("gzip" if path.suffix == ".gz" else None))
-    score_col = find_score_column(df)
-    scores = df[score_col].to_numpy(dtype=np.float32)
-    scores.sort()
-    return alg, length, allele, scores
+    if alg == 'MHCflurryEL':
+        pres_score_col = "MHCflurryEL Presentation Score"
+        proc_score_col = "MHCflurryEL Processing Score"
+        pres_scores = df[pres_score_col].to_numpy(dtype=np.float32)
+        pres_scores.sort()
+        proc_scores = df[proc_score_col].to_numpy(dtype=np.float32)
+        proc_scores.sort()
+        return [("MHCflurry_EL_Presentation", length, allele, pres_scores), ("MHCflurry_EL_Processing", length, allele, proc_scores)]
+    else:
+        score_col = find_score_column(df)
+        scores = df[score_col].to_numpy(dtype=np.float32)
+        scores.sort()
+        return [(alg, length, allele, scores)]
 
 
 def group_files_by_algorithm(paths: Iterable[Path]) -> Dict[str, List[Path]]:
@@ -124,20 +133,22 @@ def build_hdf5_for_allele(allele: str, files: Iterable[Path], out_dir: Path) -> 
     with h5py.File(out_path, "w") as h5:
         # For each file, process and store under /<Algorithm>/<Length>mer
         for p in sorted(files):
-            alg, length, file_allele, scores = process_file(p)
-            # sanity: file_allele should match allele
-            if file_allele != allele:
-                # this shouldn't happen since files were grouped by allele, but skip if it does
-                print(f"Skipping {p.name}: allele mismatch ({file_allele} != {allele})")
-                continue
-            grp = h5.require_group(alg)
-            ds_name = f"{length}mer"
-            # overwrite if present
-            if ds_name in grp:
-                print(f"Overwriting dataset /{alg}/{ds_name} in {out_path}")
-                del grp[ds_name]
-            grp.create_dataset(ds_name, data=scores, compression="gzip", compression_opts=4)
-            print(f"Stored {p.name} -> {out_path}:/{alg}/{ds_name} (n={scores.size})")
+            results = process_file(p)
+            for result in results:
+                alg, length, file_allele, scores = result
+                # sanity: file_allele should match allele
+                if file_allele != allele:
+                    # this shouldn't happen since files were grouped by allele, but skip if it does
+                    print(f"Skipping {p.name}: allele mismatch ({file_allele} != {allele})")
+                    continue
+                grp = h5.require_group(alg)
+                ds_name = f"{length}mer"
+                # overwrite if present
+                if ds_name in grp:
+                    print(f"Overwriting dataset /{alg}/{ds_name} in {out_path}")
+                    del grp[ds_name]
+                grp.create_dataset(ds_name, data=scores, compression="gzip", compression_opts=4)
+                print(f"Stored {p.name} -> {out_path}:/{alg}/{ds_name} (n={scores.size})")
     return out_path
 
 
