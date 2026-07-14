@@ -88,6 +88,14 @@ def process_file(path: Path) -> Tuple[str, int, str, np.ndarray]:
         proc_scores = df[proc_score_col].to_numpy(dtype=np.float32)
         proc_scores.sort()
         return [("MHCflurry_EL_Presentation", length, allele, pres_scores), ("MHCflurry_EL_Processing", length, allele, proc_scores)]
+    elif alg == 'TLBind':
+        bind_score_col = "TLBind IC50 Score"
+        pres_score_col = "TLBind Presentation Score"
+        bind_scores = df[bind_score_col].to_numpy(dtype=np.float32)
+        bind_scores.sort()
+        pres_scores = df[pres_score_col].to_numpy(dtype=np.float32)
+        pres_scores.sort()
+        return [("TLBind_Presentation", length, allele, pres_scores), ("TLBind_Binding", length, allele, bind_scores)]
     else:
         score_col = find_score_column(df)
         scores = df[score_col].to_numpy(dtype=np.float32)
